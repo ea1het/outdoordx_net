@@ -1,2 +1,1 @@
-# outdoordx_net
-outdoordx.net
+# outdoordx.net
