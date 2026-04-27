@@ -1,0 +1,411 @@
+openapi: 3.1.0
+
+info:
+  title: Outdoor DX API
+  version: 0.1.0
+  description: >
+    Real-time and historical aggregation of amateur radio field activations
+    across programs including POTA, SOTA, IOTA, WWFF, and WWBOTA.
+    Full API documentation and access coming soon at https://outdoordx.net.
+  contact:
+    name: Outdoor DX
+    url: https://outdoordx.net
+  license:
+    name: Mozilla Public License 2.0
+    url: https://www.mozilla.org/en-US/MPL/2.0/
+  x-links:
+    webUI: https://outdoordx.com
+    restAPI: https://outdoordx.net
+    docs: https://outdoordx.org
+
+servers:
+  - url: https://api.outdoordx.net/v1
+    description: REST API — coming soon
+
+tags:
+  - name: activations
+    description: Field activations across all supported programs
+  - name: spots
+    description: Real-time spots for ongoing activations
+  - name: programs
+    description: Supported award programs
+  - name: references
+    description: Program references (parks, summits, islands, etc.)
+  - name: operators
+    description: Licensed amateur radio operators
+
+paths:
+
+  /activations:
+    get:
+      operationId: listActivations
+      summary: List activations
+      description: Returns a paginated list of activations, optionally filtered by program, status, operator, or reference.
+      tags: [activations]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: program
+          in: query
+          description: Filter by program identifier (e.g. `pota`, `sota`).
+          schema:
+            $ref: '#/components/schemas/ProgramId'
+        - name: status
+          in: query
+          description: Filter by activation status.
+          schema:
+            type: string
+            enum: [active, completed]
+        - name: callsign
+          in: query
+          description: Filter by operator callsign.
+          schema:
+            type: string
+            example: EA1HET
+        - name: reference
+          in: query
+          description: Filter by program reference (e.g. `EA-0001`, `EA1/LE-036`).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A list of activations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivationList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /activations/{id}:
+    get:
+      operationId: getActivation
+      summary: Get an activation
+      tags: [activations]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: An activation object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /spots:
+    get:
+      operationId: listSpots
+      summary: List real-time spots
+      description: Returns the most recent spots across all programs or filtered by program/callsign.
+      tags: [spots]
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - name: program
+          in: query
+          schema:
+            $ref: '#/components/schemas/ProgramId'
+        - name: callsign
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A list of spots.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpotList'
+
+  /programs:
+    get:
+      operationId: listPrograms
+      summary: List supported programs
+      tags: [programs]
+      responses:
+        '200':
+          description: All supported award programs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Program'
+
+  /programs/{programId}:
+    get:
+      operationId: getProgram
+      summary: Get a program
+      tags: [programs]
+      parameters:
+        - name: programId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ProgramId'
+      responses:
+        '200':
+          description: Program details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Program'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /references/{programId}/{reference}:
+    get:
+      operationId: getReference
+      summary: Get a program reference
+      description: Returns metadata for a specific reference within a program (park, summit, island, etc.).
+      tags: [references]
+      parameters:
+        - name: programId
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/ProgramId'
+        - name: reference
+          in: path
+          required: true
+          schema:
+            type: string
+            example: EA1/LE-036
+      responses:
+        '200':
+          description: Reference metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reference'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /operators/{callsign}:
+    get:
+      operationId: getOperator
+      summary: Get an operator
+      tags: [operators]
+      parameters:
+        - name: callsign
+          in: path
+          required: true
+          schema:
+            type: string
+            example: EA1HET
+      responses:
+        '200':
+          description: Operator profile and activation summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operator'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  schemas:
+
+    ProgramId:
+      type: string
+      enum: [pota, sota, iota, wwff, wwbota]
+      description: Identifier for a supported award program.
+      example: sota
+
+    Program:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          $ref: '#/components/schemas/ProgramId'
+        name:
+          type: string
+          example: Summits On The Air
+        abbreviation:
+          type: string
+          example: SOTA
+        url:
+          type: string
+          format: uri
+          example: https://www.sota.org.uk
+
+    Reference:
+      type: object
+      required: [programId, reference, name]
+      properties:
+        programId:
+          $ref: '#/components/schemas/ProgramId'
+        reference:
+          type: string
+          example: EA1/LE-036
+        name:
+          type: string
+          example: Peña Trevinca
+        elevation_m:
+          type: integer
+          description: Elevation in metres (for summits).
+          example: 2127
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+        country:
+          type: string
+          example: Spain
+
+    GeoPoint:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat:
+          type: number
+          format: double
+          example: 42.1631
+        lon:
+          type: number
+          format: double
+          example: -6.8978
+
+    Operator:
+      type: object
+      required: [callsign]
+      properties:
+        callsign:
+          type: string
+          example: EA1HET
+        name:
+          type: string
+        activation_count:
+          type: integer
+
+    Activation:
+      type: object
+      required: [id, programId, callsign, reference, status]
+      properties:
+        id:
+          type: string
+        programId:
+          $ref: '#/components/schemas/ProgramId'
+        callsign:
+          type: string
+          example: EA1HET
+        reference:
+          $ref: '#/components/schemas/Reference'
+        status:
+          type: string
+          enum: [active, completed]
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        spots:
+          type: array
+          items:
+            $ref: '#/components/schemas/Spot'
+
+    ActivationList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Activation'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    Spot:
+      type: object
+      required: [id, callsign, frequency_khz, spotted_at]
+      properties:
+        id:
+          type: string
+        callsign:
+          type: string
+          example: EA1HET
+        reference:
+          type: string
+          example: EA1/LE-036
+        programId:
+          $ref: '#/components/schemas/ProgramId'
+        frequency_khz:
+          type: number
+          example: 14285.0
+        mode:
+          type: string
+          example: SSB
+        comment:
+          type: string
+        spotter:
+          type: string
+          description: Callsign of the station that spotted the activation.
+        spotted_at:
+          type: string
+          format: date-time
+
+    SpotList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Spot'
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

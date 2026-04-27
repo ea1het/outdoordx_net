@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Outdoor DX API</title>
+    <meta name="description" content="Outdoor DX API — real-time amateur radio field activation data. Coming soon." />
+    <style>
+      body { margin: 0; padding: 0; }
+
+      #banner {
+        position: sticky;
+        top: 0;
+        z-index: 9999;
+        background: #2e7d32;
+        color: #fff;
+        text-align: center;
+        padding: 10px 16px;
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      #banner a {
+        color: #c8e6c9;
+        text-decoration: underline;
+      }
+      #banner strong {
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="banner">
+      <strong>Work in progress</strong> — API access is not yet available.
+      &nbsp;|&nbsp;
+      <a href="https://outdoordx.com" target="_blank" rel="noopener">Web UI</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://outdoordx.net" target="_blank" rel="noopener">REST API</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://outdoordx.org" target="_blank" rel="noopener">Project about</a>
+    </div>
+
+    <redoc spec-url="openapi.yaml"
+           hide-download-button
+           expand-responses="200"
+           theme='{
+             "colors": {
+               "primary": { "main": "#2e7d32" }
+             },
+             "typography": {
+               "fontFamily": "system-ui, -apple-system, sans-serif"
+             }
+           }'
+    ></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@latest/bundles/redoc.standalone.js"></script>
+  </body>
+</html>
