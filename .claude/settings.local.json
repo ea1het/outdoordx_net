@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:outdoordx.org)",
-      "WebFetch(domain:outdoordx.net)"
-    ]
-  }
-}
