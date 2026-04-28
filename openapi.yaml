@@ -2,11 +2,28 @@ openapi: 3.1.0
 
 info:
   title: Outdoor DX API
-  version: 0.1.0
-  description: >
-    Real-time and historical aggregation of amateur radio field activations
-    across programs including POTA, SOTA, IOTA, WWFF, and WWBOTA.
-    Full API documentation and access coming soon at https://outdoordx.net.
+  version: 1.0.0
+  description: |-
+    Real-time aggregation of amateur radio field activations across programs
+    including POTA, SOTA, IOTA, WWFF, and WWBOTA.
+
+    ## Endpoints
+
+    - `bff.outdoordx.net` — real-time SSE stream (Backend for Frontend)
+    - `api.outdoordx.net` — today proxied to BFF; REST API coming soon
+
+    ## CORS
+
+    All endpoints enforce CORS at the application layer. Only requests
+    originating from `https://outdoordx.com` are served with
+    `Access-Control-Allow-Origin`. Requests from other origins receive a
+    response without CORS headers and are rejected by the browser.
+
+    ## SSE connection limit
+
+    The `/stream` endpoint allows a maximum of **3 simultaneous connections
+    per IP address**. Attempting a fourth concurrent connection returns `429`.
+    There is no rate limit on reconnections beyond this concurrency cap.
   contact:
     name: Outdoor DX
     url: https://outdoordx.net
@@ -15,330 +32,107 @@ info:
     url: https://www.mozilla.org/en-US/MPL/2.0/
   x-links:
     webUI: https://outdoordx.com
-    restAPI: https://outdoordx.net
-    docs: https://outdoordx.org
+    bff: https://bff.outdoordx.net
+    docs: https://outdoordx.net
 
 servers:
-  - url: https://api.outdoordx.net/v1
-    description: REST API — coming soon
+  - url: https://bff.outdoordx.net
+    description: Backend for Frontend — real-time SSE stream
+  - url: https://api.outdoordx.net
+    description: Main API entry point (today proxied to BFF)
 
 tags:
-  - name: activations
-    description: Field activations across all supported programs
-  - name: spots
-    description: Real-time spots for ongoing activations
-  - name: programs
-    description: Supported award programs
-  - name: references
-    description: Program references (parks, summits, islands, etc.)
-  - name: operators
-    description: Licensed amateur radio operators
+  - name: streaming
+    description: Real-time spots via Server-Sent Events (SSE)
 
 paths:
 
-  /activations:
+  /stream:
     get:
-      operationId: listActivations
-      summary: List activations
-      description: Returns a paginated list of activations, optionally filtered by program, status, operator, or reference.
-      tags: [activations]
-      parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/LimitParam'
-        - name: program
-          in: query
-          description: Filter by program identifier (e.g. `pota`, `sota`).
-          schema:
-            $ref: '#/components/schemas/ProgramId'
-        - name: status
-          in: query
-          description: Filter by activation status.
-          schema:
-            type: string
-            enum: [active, completed]
-        - name: callsign
-          in: query
-          description: Filter by operator callsign.
-          schema:
-            type: string
-            example: EA1HET
-        - name: reference
-          in: query
-          description: Filter by program reference (e.g. `EA-0001`, `EA1/LE-036`).
-          schema:
-            type: string
-      responses:
-        '200':
-          description: A list of activations.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ActivationList'
-        '400':
-          $ref: '#/components/responses/BadRequest'
+      operationId: streamSpots
+      summary: Real-time spots stream
+      description: >
+        Opens a persistent Server-Sent Events (SSE) connection that delivers
+        real-time spot updates as they arrive from the aggregator.
 
-  /activations/{id}:
-    get:
-      operationId: getActivation
-      summary: Get an activation
-      tags: [activations]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: An activation object.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Activation'
-        '404':
-          $ref: '#/components/responses/NotFound'
 
-  /spots:
-    get:
-      operationId: listSpots
-      summary: List real-time spots
-      description: Returns the most recent spots across all programs or filtered by program/callsign.
-      tags: [spots]
-      parameters:
-        - $ref: '#/components/parameters/LimitParam'
-        - name: program
-          in: query
-          schema:
-            $ref: '#/components/schemas/ProgramId'
-        - name: callsign
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: A list of spots.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SpotList'
+        On connection the server sends an `init` event with a snapshot of all
+        current spots. Subsequent `add`, `update`, and `remove` events reflect
+        changes as they happen. A keep-alive comment (`: keep-alive`) is sent
+        every 30 seconds to prevent proxy timeouts.
 
-  /programs:
-    get:
-      operationId: listPrograms
-      summary: List supported programs
-      tags: [programs]
-      responses:
-        '200':
-          description: All supported award programs.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Program'
 
-  /programs/{programId}:
-    get:
-      operationId: getProgram
-      summary: Get a program
-      tags: [programs]
-      parameters:
-        - name: programId
-          in: path
-          required: true
-          schema:
-            $ref: '#/components/schemas/ProgramId'
-      responses:
-        '200':
-          description: Program details.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Program'
-        '404':
-          $ref: '#/components/responses/NotFound'
+        **Connection limit:** maximum 3 simultaneous connections per IP address.
+        A fourth concurrent request returns `429` immediately.
 
-  /references/{programId}/{reference}:
-    get:
-      operationId: getReference
-      summary: Get a program reference
-      description: Returns metadata for a specific reference within a program (park, summit, island, etc.).
-      tags: [references]
-      parameters:
-        - name: programId
-          in: path
-          required: true
-          schema:
-            $ref: '#/components/schemas/ProgramId'
-        - name: reference
-          in: path
-          required: true
-          schema:
-            type: string
-            example: EA1/LE-036
-      responses:
-        '200':
-          description: Reference metadata.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Reference'
-        '404':
-          $ref: '#/components/responses/NotFound'
 
-  /operators/{callsign}:
-    get:
-      operationId: getOperator
-      summary: Get an operator
-      tags: [operators]
-      parameters:
-        - name: callsign
-          in: path
-          required: true
-          schema:
-            type: string
-            example: EA1HET
+        **CORS:** only accepted from `https://outdoordx.com`.
+      tags: [streaming]
       responses:
         '200':
-          description: Operator profile and activation summary.
-          content:
-            application/json:
+          description: SSE stream established. The connection stays open indefinitely.
+          headers:
+            Cache-Control:
               schema:
-                $ref: '#/components/schemas/Operator'
-        '404':
-          $ref: '#/components/responses/NotFound'
+                type: string
+                example: no-cache
+            Connection:
+              schema:
+                type: string
+                example: keep-alive
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+                example: https://outdoordx.com
+              description: Present only when the request Origin matches the allowed origin.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SseMessage'
+              examples:
+                init:
+                  summary: Initial snapshot on connect
+                  value: |
+                    event: init
+                    data: [{"id":"pota:EA-1234","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}]
+
+                add:
+                  summary: New spot published
+                  value: |
+                    event: add
+                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":7032.0,"mode":"CW"}
+
+                update:
+                  summary: Existing spot updated
+                  value: |
+                    event: update
+                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}
+
+                remove:
+                  summary: Spot removed
+                  value: |
+                    event: remove
+                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}
+
+                keepAlive:
+                  summary: Keep-alive comment (no event, no data)
+                  value: |
+                    : keep-alive
+
+                error:
+                  summary: Stream error
+                  value: |
+                    event: error
+                    data: {"error":"redis_unreachable"}
+
+        '429':
+          $ref: '#/components/responses/ConnectionLimitExceeded'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 components:
 
-  parameters:
-    PageParam:
-      name: page
-      in: query
-      schema:
-        type: integer
-        minimum: 1
-        default: 1
-    LimitParam:
-      name: limit
-      in: query
-      schema:
-        type: integer
-        minimum: 1
-        maximum: 100
-        default: 20
-
   schemas:
-
-    ProgramId:
-      type: string
-      enum: [pota, sota, iota, wwff, wwbota]
-      description: Identifier for a supported award program.
-      example: sota
-
-    Program:
-      type: object
-      required: [id, name]
-      properties:
-        id:
-          $ref: '#/components/schemas/ProgramId'
-        name:
-          type: string
-          example: Summits On The Air
-        abbreviation:
-          type: string
-          example: SOTA
-        url:
-          type: string
-          format: uri
-          example: https://www.sota.org.uk
-
-    Reference:
-      type: object
-      required: [programId, reference, name]
-      properties:
-        programId:
-          $ref: '#/components/schemas/ProgramId'
-        reference:
-          type: string
-          example: EA1/LE-036
-        name:
-          type: string
-          example: Peña Trevinca
-        elevation_m:
-          type: integer
-          description: Elevation in metres (for summits).
-          example: 2127
-        location:
-          $ref: '#/components/schemas/GeoPoint'
-        country:
-          type: string
-          example: Spain
-
-    GeoPoint:
-      type: object
-      required: [lat, lon]
-      properties:
-        lat:
-          type: number
-          format: double
-          example: 42.1631
-        lon:
-          type: number
-          format: double
-          example: -6.8978
-
-    Operator:
-      type: object
-      required: [callsign]
-      properties:
-        callsign:
-          type: string
-          example: EA1HET
-        name:
-          type: string
-        activation_count:
-          type: integer
-
-    Activation:
-      type: object
-      required: [id, programId, callsign, reference, status]
-      properties:
-        id:
-          type: string
-        programId:
-          $ref: '#/components/schemas/ProgramId'
-        callsign:
-          type: string
-          example: EA1HET
-        reference:
-          $ref: '#/components/schemas/Reference'
-        status:
-          type: string
-          enum: [active, completed]
-        started_at:
-          type: string
-          format: date-time
-        ended_at:
-          type: string
-          format: date-time
-          nullable: true
-        spots:
-          type: array
-          items:
-            $ref: '#/components/schemas/Spot'
-
-    ActivationList:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Activation'
-        meta:
-          $ref: '#/components/schemas/PaginationMeta'
 
     Spot:
       type: object
@@ -353,7 +147,9 @@ components:
           type: string
           example: EA1/LE-036
         programId:
-          $ref: '#/components/schemas/ProgramId'
+          type: string
+          enum: [pota, sota, iota, wwff, wwbota]
+          example: sota
         frequency_khz:
           type: number
           example: 14285.0
@@ -369,43 +165,78 @@ components:
           type: string
           format: date-time
 
-    SpotList:
+    SseMessage:
+      description: >
+        A single Server-Sent Event frame. The wire format is plain text;
+        each frame consists of `event: <type>` and `data: <json>` lines
+        separated by a blank line. Keep-alive frames are SSE comments
+        (`: keep-alive`) with no event or data.
+      oneOf:
+        - $ref: '#/components/schemas/SseInitEvent'
+        - $ref: '#/components/schemas/SseSpotEvent'
+        - $ref: '#/components/schemas/SseErrorEvent'
+      discriminator:
+        propertyName: event
+        mapping:
+          init: '#/components/schemas/SseInitEvent'
+          add: '#/components/schemas/SseSpotEvent'
+          update: '#/components/schemas/SseSpotEvent'
+          remove: '#/components/schemas/SseSpotEvent'
+          error: '#/components/schemas/SseErrorEvent'
+
+    SseInitEvent:
       type: object
+      description: Sent once on connection. Contains a snapshot of all current spots.
+      required: [event, data]
       properties:
+        event:
+          type: string
+          const: init
         data:
           type: array
           items:
             $ref: '#/components/schemas/Spot'
 
-    PaginationMeta:
+    SseSpotEvent:
       type: object
+      description: Sent when a spot is added, updated, or removed.
+      required: [event, data]
       properties:
-        page:
-          type: integer
-        limit:
-          type: integer
-        total:
-          type: integer
+        event:
+          type: string
+          enum: [add, update, remove]
+        data:
+          $ref: '#/components/schemas/Spot'
 
-    Error:
+    SseErrorEvent:
       type: object
-      required: [code, message]
+      description: Sent when the stream encounters an unrecoverable error. The connection closes after this event.
+      required: [event, data]
       properties:
-        code:
+        event:
           type: string
-        message:
-          type: string
+          const: error
+        data:
+          type: object
+          required: [error]
+          properties:
+            error:
+              type: string
+              enum: [redis_not_configured, redis_unreachable, redis_stream_failure]
 
   responses:
-    BadRequest:
-      description: Invalid request parameters.
+
+    ConnectionLimitExceeded:
+      description: >
+        Maximum number of simultaneous SSE connections per IP address reached
+        (default: 3). Close an existing connection before opening a new one.
+
+    ServiceUnavailable:
+      description: The upstream data store (Redis) is unreachable.
       content:
-        application/json:
+        text/event-stream:
           schema:
-            $ref: '#/components/schemas/Error'
-    NotFound:
-      description: Resource not found.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
+            $ref: '#/components/schemas/SseErrorEvent'
+          example: |
+            event: error
+            data: {"error":"redis_unreachable"}
