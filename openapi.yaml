@@ -1,16 +1,29 @@
 openapi: 3.1.0
 
 info:
-  title: Outdoor DX API
-  version: 1.0.0
+  title: OutdoorDX API
+  version: 1.0.1
   description: |-
-    Real-time aggregation of amateur radio field activations across programs
-    including POTA, SOTA, IOTA, WWFF, and WWBOTA.
+    Real-time aggregation of amateur radio field activations across programmes
+    including POTA, SOTA, IOTA, WWFF, WWBOTA, and DXped.
 
-    ## Endpoints
+    ## Architecture
 
-    - `bff.outdoordx.net` — real-time SSE stream (Backend for Frontend)
-    - `api.outdoordx.net` — today proxied to BFF; REST API coming soon
+    The Outdoor DX backend runs two services behind a load balancer:
+
+    - **`bff.outdoordx.net`** (`outdoordx-bff` v1.1.8) — Backend for Frontend.
+      Maintains the Redis Pub/Sub bridge and serves the real-time SSE stream
+      to browsers.
+    - **`api.outdoordx.net`** (`outdoordx-api` v1.0.1) — HamAlert ingestion
+      service. Receives spot webhooks from HamAlert, normalises them to the
+      OutdoorDX contract, persists them in Redis with a TTL and publishes them
+      to the Pub/Sub channel consumed by the BFF.
+
+    ## Shared endpoints
+
+    Both services expose identical `GET /`, `GET /health`, and `GET /ready`
+    endpoints. The `service` field in the response body identifies which
+    service answered.
 
     ## CORS
 
@@ -24,6 +37,16 @@ info:
     The `/stream` endpoint allows a maximum of **3 simultaneous connections
     per IP address**. Attempting a fourth concurrent connection returns `429`.
     There is no rate limit on reconnections beyond this concurrency cap.
+
+    ## Rate limiting
+
+    All endpoints are subject to rate limiting. The default is 60 requests per
+    minute per IP address, controlled by the `RATELIMIT_DEFAULT` environment
+    variable on each service. `/stream` is exempt (connection concurrency is
+    enforced separately). Per-endpoint overrides are available via dedicated
+    environment variables — for example `RATELIMIT_HAMALERT` on
+    `api.outdoordx.net` raises the limit for the ingestion endpoint without
+    affecting the global default.
   contact:
     name: Outdoor DX
     url: https://outdoordx.net
@@ -33,19 +56,181 @@ info:
   x-links:
     webUI: https://outdoordx.com
     bff: https://bff.outdoordx.net
+    api: https://api.outdoordx.net
     docs: https://outdoordx.net
 
 servers:
   - url: https://bff.outdoordx.net
     description: Backend for Frontend — real-time SSE stream
   - url: https://api.outdoordx.net
-    description: Main API entry point (today proxied to BFF)
+    description: HamAlert ingestion service — REST API
 
 tags:
+  - name: discovery
+    description: Service root and hypermedia links (HATEOAS)
+  - name: observability
+    description: Liveness and readiness probes for health monitoring
   - name: streaming
-    description: Real-time spots via Server-Sent Events (SSE)
+    description: Real-time spots via Server-Sent Events (SSE) — bff.outdoordx.net only
+  - name: ingestion
+    description: Spot ingestion from HamAlert webhooks — api.outdoordx.net only
 
 paths:
+
+  /:
+    get:
+      operationId: getRoot
+      summary: Service discovery
+      description: >
+        Returns service metadata and hypermedia links to all available endpoints
+        (HATEOAS). Useful for clients that want to discover what the service
+        offers without prior knowledge of its routes.
+
+        Available on both `bff.outdoordx.net` and `api.outdoordx.net`.
+        The `service` field in the response identifies which service answered
+        and determines which links are present.
+
+        Subject to the default rate limit (60 requests per minute per IP).
+      tags: [discovery]
+      responses:
+        '200':
+          description: Service metadata and hypermedia links.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootResponse'
+              examples:
+                bff:
+                  summary: BFF response
+                  value:
+                    service: outdoordx-bff
+                    version: "1.1.8"
+                    environment: production
+                    links:
+                      - rel: health
+                        href: /health
+                        method: GET
+                        description: Liveness probe
+                      - rel: ready
+                        href: /ready
+                        method: GET
+                        description: Readiness probe
+                      - rel: stream
+                        href: /stream
+                        method: GET
+                        description: SSE stream for OutdoorDX spots
+                api:
+                  summary: API response
+                  value:
+                    service: outdoordx-api
+                    version: "1.0.1"
+                    environment: production
+                    links:
+                      - rel: health
+                        href: /health
+                        method: GET
+                        description: Liveness probe
+                      - rel: ready
+                        href: /ready
+                        method: GET
+                        description: Readiness probe
+                      - rel: hamalert
+                        href: /hamalert
+                        method: POST
+                        description: HamAlert ingestion endpoint
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      description: >
+        Liveness probe for orchestration platforms (Kubernetes, Docker Compose,
+        load balancers). Returns `200 OK` as long as the process is running.
+        Does **not** check external dependencies such as Redis — use `/ready`
+        for dependency checks.
+
+        Available on both `bff.outdoordx.net` and `api.outdoordx.net`.
+        Subject to the default rate limit (60 requests per minute per IP).
+      tags: [observability]
+      responses:
+        '200':
+          description: Service process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                bff:
+                  summary: BFF liveness response
+                  value:
+                    status: ok
+                    service: outdoordx-bff
+                    version: "1.1.8"
+                api:
+                  summary: API liveness response
+                  value:
+                    status: ok
+                    service: outdoordx-api
+                    version: "1.0.1"
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+
+  /ready:
+    get:
+      operationId: getReady
+      summary: Readiness probe
+      description: >
+        Readiness probe indicating whether the service can handle traffic.
+        Checks Redis connectivity by sending a `PING` command. Returns `503`
+        if Redis is disabled or unreachable.
+
+        On `bff.outdoordx.net` the response additionally includes an `online`
+        field with the current number of unique client IPs and total open SSE
+        sessions, derived from Redis connection-tracking keys
+        (`odx:connections:*`). This field is omitted when Redis metric reads
+        fail even though the service itself is ready.
+
+        Available on both `bff.outdoordx.net` and `api.outdoordx.net`.
+        Subject to the default rate limit (60 requests per minute per IP).
+      tags: [observability]
+      responses:
+        '200':
+          description: Service is ready to accept traffic. Redis is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              examples:
+                ready:
+                  summary: Ready (HamAlert API or BFF without metrics)
+                  value:
+                    status: ready
+                readyWithMetrics:
+                  summary: Ready with connection metrics (BFF only)
+                  value:
+                    status: ready
+                    online: "5/12"
+        '503':
+          description: Service is not ready — Redis is disabled or unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotReadyResponse'
+              examples:
+                redisDisabled:
+                  summary: Redis disabled in configuration
+                  value:
+                    status: not_ready
+                    reason: redis_disabled
+                redisUnreachable:
+                  summary: Redis unreachable at runtime
+                  value:
+                    status: not_ready
+                    reason: redis_unreachable
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
 
   /stream:
     get:
@@ -55,19 +240,22 @@ paths:
         Opens a persistent Server-Sent Events (SSE) connection that delivers
         real-time spot updates as they arrive from the aggregator.
 
-
-        On connection the server sends an `init` event with a snapshot of all
-        current spots. Subsequent `add`, `update`, and `remove` events reflect
-        changes as they happen. A keep-alive comment (`: keep-alive`) is sent
-        every 30 seconds to prevent proxy timeouts.
-
+        On connection the server sends an `init` event with an array of all
+        current spots. Subsequent `add` and `update` events reflect changes as
+        they happen. A keep-alive comment (`: keep-alive`) is sent every 30
+        seconds to prevent proxy timeouts. The `remove` event type is handled
+        by the BFF but is reserved — no current publisher produces it.
 
         **Connection limit:** maximum 3 simultaneous connections per IP address.
         A fourth concurrent request returns `429` immediately.
 
-
         **CORS:** only accepted from `https://outdoordx.com`.
+
+        **Available on `bff.outdoordx.net` only.**
       tags: [streaming]
+      servers:
+        - url: https://bff.outdoordx.net
+          description: Backend for Frontend — real-time SSE stream
       responses:
         '200':
           description: SSE stream established. The connection stays open indefinitely.
@@ -80,6 +268,13 @@ paths:
               schema:
                 type: string
                 example: keep-alive
+            X-Accel-Buffering:
+              schema:
+                type: string
+                example: "no"
+              description: >
+                Instructs nginx/HAProxy to disable response buffering so each
+                SSE frame is flushed to the client immediately.
             Access-Control-Allow-Origin:
               schema:
                 type: string
@@ -94,41 +289,227 @@ paths:
                   summary: Initial snapshot on connect
                   value: |
                     event: init
-                    data: [{"id":"pota:EA-1234","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}]
+                    data: [
+                    data:   {
+                    data:     "id": "pota:US-1234",
+                    data:     "source": "POTA",
+                    data:     "activator": "KD9ABC",
+                    data:     "frequency": 14285500,
+                    data:     "band": "20m",
+                    data:     "mode": "SSB",
+                    data:     "mode_class": "VOICE",
+                    data:     "references": ["US-1234"],
+                    data:     "name": "Salt Plains State Park",
+                    data:     "continent": "NA",
+                    data:     "dxcc": "United States",
+                    data:     "spot_time": "2026-05-02T00:58:00+00:00",
+                    data:     "status": "active",
+                    data:     "ttl": 3600
+                    data:   }
+                    data: ]
 
                 add:
                   summary: New spot published
                   value: |
                     event: add
-                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":7032.0,"mode":"CW"}
+                    data: {
+                    data:   "action": "add",
+                    data:   "spot": {
+                    data:     "id": "sota:EA1/LE-036",
+                    data:     "source": "SOTA",
+                    data:     "activator": "EA1HET",
+                    data:     "frequency": 7032000,
+                    data:     "band": "40m",
+                    data:     "mode": "CW",
+                    data:     "mode_class": "CW",
+                    data:     "references": ["EA1/LE-036"],
+                    data:     "name": "Alto del Cerredo",
+                    data:     "continent": "EU",
+                    data:     "dxcc": "Spain",
+                    data:     "spot_time": "2026-05-02T22:57:00+00:00",
+                    data:     "status": "active",
+                    data:     "ttl": 3600
+                    data:   }
+                    data: }
 
                 update:
                   summary: Existing spot updated
                   value: |
                     event: update
-                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}
+                    data: {
+                    data:   "action": "update",
+                    data:   "spot": {
+                    data:     "id": "sota:EA1/LE-036",
+                    data:     "source": "SOTA",
+                    data:     "activator": "EA1HET",
+                    data:     "frequency": 14285000,
+                    data:     "band": "20m",
+                    data:     "mode": "SSB",
+                    data:     "mode_class": "VOICE",
+                    data:     "references": ["EA1/LE-036"],
+                    data:     "name": "Alto del Cerredo",
+                    data:     "continent": "EU",
+                    data:     "dxcc": "Spain",
+                    data:     "spot_time": "2026-05-02T23:05:00+00:00",
+                    data:     "status": "active",
+                    data:     "ttl": 3600
+                    data:   }
+                    data: }
 
                 remove:
-                  summary: Spot removed
+                  summary: Spot removed (reserved — no current publisher)
                   value: |
                     event: remove
-                    data: {"id":"sota:EA1/LE-036","callsign":"EA1HET","frequency_khz":14285.0,"mode":"SSB"}
+                    data: {"id": "sota:EA1/LE-036"}
 
                 keepAlive:
-                  summary: Keep-alive comment (no event, no data)
+                  summary: Keep-alive comment (no event or data lines)
                   value: |
                     : keep-alive
 
                 error:
-                  summary: Stream error
+                  summary: Unrecoverable stream error
                   value: |
                     event: error
-                    data: {"error":"redis_unreachable"}
+                    data: {"error": "redis_unreachable"}
 
         '429':
           $ref: '#/components/responses/ConnectionLimitExceeded'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+
+  /hamalert:
+    post:
+      operationId: ingestHamAlert
+      summary: HamAlert webhook ingestion
+      description: >
+        Receives spot notifications from HamAlert, normalises them to the
+        OutdoorDX spot contract, persists them in Redis with a TTL, and
+        publishes an `add` or `update` event to the `odx:events` Pub/Sub
+        channel consumed by the BFF.
+
+        **Available on `api.outdoordx.net` only.**
+
+        Subject to rate limiting. The default limit (`RATELIMIT_DEFAULT`) applies
+        unless overridden by `RATELIMIT_HAMALERT` on the service, which allows
+        raising the ceiling for this endpoint independently.
+
+        ## Source classification
+
+        The service inspects the payload to decide whether the spot is `IOTA` or
+        `DXPED`. A payload is classified as IOTA if any of the following are true:
+        the fields `category`, `program`, `type`, `source`, `title`, or
+        `triggerComment` contain the string `IOTA`; the fields `iotaGroupRef`,
+        `iotaGroupName`, `iota`, or `iota_ref` are present; or any resolved
+        reference starts with `IOTA`. Otherwise the spot is classified as `DXPED`.
+
+        ## ID derivation
+
+        The spot ID is composed as `<source_lower>:<raw_id>`. The raw ID is taken
+        from the first non-empty field among `id`, `spot_id`, `uuid`, `alert_id`.
+        If none are present a synthetic ID is built as `<callsign>_<reference>`.
+
+        ## Frequency unit detection
+
+        The `frequency` (or `freq`) value is interpreted by magnitude:
+        - `< 1 000` → treated as **MHz**, converted to Hz by × 1 000 000
+        - `1 000 – 999 999` → treated as **kHz**, converted to Hz by × 1 000
+        - `≥ 1 000 000` → treated as **Hz**, used as-is
+
+        ## Callsign resolution
+
+        The activator callsign is taken from the first non-empty field among
+        `call`, `activator`, `callsign`, `dx_call`.
+
+        ## Timestamp normalisation
+
+        The spot time is taken from the first non-empty field among `time`,
+        `spot_time`, `timestamp`, `datetime`. A bare `HH:MM` value is expanded
+        to a full ISO 8601 timestamp using today's UTC date. If no field is
+        present the current UTC time is used.
+
+        ## Status normalisation
+
+        The `status` (or `type`) field is uppercased and compared to `QRT`.
+        A match produces `qrt`; anything else produces `active`.
+
+        ## Validation
+
+        After normalisation the following fields are required and must be
+        non-empty; a missing or invalid value returns `400 KO`:
+        - `activator` — resolved callsign
+        - `frequency` — numeric Hz value (non-zero)
+        - `spot_time` — resolved timestamp string
+        - `ttl` — positive integer (defaults to `HAMALERT_TTL_SECONDS`)
+
+        ## Persistence and fanout
+
+        On success the normalised spot is written to Redis at
+        `odx:spot:<source_lower>:<raw_id>` with the resolved TTL, added to the
+        sorted set `odx:spots:all` (scored by Unix timestamp), and a JSON message
+        `{"action": "add"|"update", "spot": {...}}` is published to the
+        `odx:events` Pub/Sub channel. The action is `update` if a key for this
+        spot already exists in Redis, `add` otherwise.
+
+        The response body is plain-text `OK` on success or `KO` on any failure.
+      tags: [ingestion]
+      servers:
+        - url: https://api.outdoordx.net
+          description: HamAlert ingestion service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HamAlertPayload'
+            examples:
+              sota:
+                summary: SOTA spot
+                value:
+                  callsign: EA1HET
+                  frequency: 14.285
+                  mode: SSB
+                  time: "22:57"
+                  reference: EA1/LE-036
+                  entity: Spain
+                  continent: EU
+                  comment: "CQ SOTA"
+              iota:
+                summary: IOTA spot
+                value:
+                  callsign: GM3YOR
+                  frequency: 7.032
+                  mode: CW
+                  time: "10:14"
+                  iotaGroupRef: EU-008
+                  iotaGroupName: Orkney Islands
+                  continent: EU
+                  entity: Scotland
+      responses:
+        '200':
+          description: >
+            Spot accepted, normalised, stored in Redis, and published to the
+            Pub/Sub channel.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: OK
+              example: OK
+        '400':
+          description: >
+            Spot rejected. Causes: body is not a JSON object; one or more
+            required normalised fields (`activator`, `frequency`, `spot_time`,
+            `ttl`) are missing or invalid; Redis is unavailable or the write
+            failed.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: KO
+              example: KO
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
 
 components:
 
@@ -136,57 +517,475 @@ components:
 
     Spot:
       type: object
-      required: [id, callsign, frequency_khz, spotted_at]
+      description: >
+        Normalised OutdoorDX spot representing a single amateur radio field
+        activation. Frequency is always expressed as an integer in Hz.
+      required: [id, source, activator, frequency, spot_time, status, ttl]
       properties:
         id:
           type: string
+          description: >
+            Unique spot identifier in `<source_lower>:<raw_id>` form. The
+            source prefix is always lowercase (e.g. `pota:`, `sota:`).
+          example: "pota:US-1234"
+        source:
+          type: string
+          enum: [POTA, SOTA, IOTA, WWFF, WWBOTA, DXPED]
+          description: Originating programme.
+          example: POTA
+        activator:
+          type: string
+          description: Callsign of the station on air.
+          example: KD9ABC
+        spotter:
+          type: string
+          description: Callsign of the station that reported the spot.
+          example: W1AW
+        frequency:
+          type: integer
+          description: Operating frequency in Hz.
+          example: 14285500
+        band:
+          type: string
+          enum: [160m, 80m, 40m, 30m, 20m, 17m, 15m, 12m, 10m, 6m, 2m, 70cm]
+          description: >
+            Amateur radio band label derived from frequency. `null` when the
+            frequency falls outside all known amateur allocations.
+          example: 20m
+        mode:
+          type: string
+          description: Operating mode as reported by the spotter, uppercased.
+          example: SSB
+        mode_class:
+          type: string
+          enum: [CW, DIGI, VOICE, OTHER]
+          description: >
+            Normalised mode category. `CW` covers Morse code. `DIGI` covers
+            RTTY, FT8, FT4, PSK, and DIGITAL. `VOICE` covers SSB, USB, LSB,
+            FM, and AM. Everything else is `OTHER`.
+          example: VOICE
+        references:
+          type: array
+          items:
+            type: string
+          description: Programme reference codes (park, summit, island, etc.).
+          example: ["US-1234"]
+        name:
+          type: string
+          description: >
+            Human-readable name of the activated location. Falls back to a
+            comma-joined list of references when no name field is present.
+          example: Salt Plains State Park
+        location:
+          type: string
+          description: Free-text location description.
+        grid:
+          type: string
+          description: Maidenhead grid square.
+          example: EM26
+        dxcc:
+          type: string
+          description: DXCC entity name.
+          example: United States
+        dxcc_id:
+          type: integer
+          description: DXCC entity number.
+          example: 291
+        continent:
+          type: string
+          enum: [AF, AN, AS, EU, NA, OC, SA, UNK]
+          description: >
+            Two-letter continent code. `UNK` is produced when the continent
+            field is absent or empty.
+          example: NA
+        cq_zone:
+          type: integer
+          description: CQ zone number. Comma-separated values are truncated to the first.
+          example: 4
+        latitude:
+          type: number
+          format: float
+          description: Latitude of the activated location.
+        longitude:
+          type: number
+          format: float
+          description: Longitude of the activated location.
+        spot_time:
+          type: string
+          format: date-time
+          description: UTC timestamp of the spot in ISO 8601 format.
+          example: "2026-05-02T22:57:00+00:00"
+        status:
+          type: string
+          enum: [active, qrt]
+          description: "`active` while on air; `qrt` after the activator signs off."
+          example: active
+        comments:
+          type: string
+          description: Free-text comment from the spotter.
+        ttl:
+          type: integer
+          description: Remaining time-to-live in seconds before the spot expires.
+          example: 3600
+        meta:
+          type: object
+          description: >
+            Source-specific metadata not covered by the normalised contract.
+            Present only for HamAlert-sourced spots (IOTA, DXPED).
+          properties:
+            hamalert:
+              type: object
+              description: HamAlert raw fields preserved verbatim after normalisation.
+              properties:
+                fullCallsign:
+                  type: string
+                  description: Full callsign including portable suffix (e.g. EA1HET/P).
+                callsign:
+                  type: string
+                  description: Base callsign as sent by HamAlert.
+                band:
+                  type: string
+                  description: Band label from HamAlert (not normalised).
+                modeDetail:
+                  type: string
+                  description: Detailed mode string (e.g. FT8, USB) from HamAlert.
+                homeDxcc:
+                  type: integer
+                  description: DXCC number of the activator's home entity.
+                spotterDxcc:
+                  type: integer
+                  description: DXCC number of the spotter's entity.
+                spotterCq:
+                  type: integer
+                  description: CQ zone of the spotter.
+                spotterContinent:
+                  type: string
+                  description: Continent code of the spotter, uppercased.
+                entity:
+                  type: string
+                  description: DXCC entity name of the activated location.
+                homeEntity:
+                  type: string
+                  description: DXCC entity name of the activator's home.
+                spotterEntity:
+                  type: string
+                  description: DXCC entity name of the spotter.
+                rawText:
+                  type: string
+                  description: Original raw spot text from HamAlert.
+                triggerComment:
+                  type: string
+                  description: HamAlert comment explaining why the alert triggered.
+                title:
+                  type: string
+                  description: DXped or alert title from HamAlert.
+                qsl:
+                  type: string
+                  description: QSL information if provided.
+                state:
+                  type: string
+                  description: State or province of the activated location.
+                spotterState:
+                  type: string
+                  description: State or province of the spotter.
+                speed:
+                  type: integer
+                  description: CW transmission speed in WPM.
+                snr:
+                  type: integer
+                  description: Signal-to-noise ratio in dB.
+                iotaGroupRef:
+                  type: string
+                  description: IOTA group reference (e.g. EU-008).
+                iotaGroupName:
+                  type: string
+                  description: IOTA group name (e.g. Orkney Islands).
+                summitRef:
+                  type: string
+                  description: SOTA summit reference.
+                summitName:
+                  type: string
+                  description: SOTA summit name.
+                summitHeight:
+                  type: integer
+                  description: SOTA summit height in metres.
+                summitPoints:
+                  type: integer
+                  description: SOTA summit activation points.
+                wwffRef:
+                  type: string
+                  description: WWFF reference code.
+                wwffName:
+                  type: string
+                  description: WWFF park name.
+                wwffDivision:
+                  type: string
+                  description: WWFF national division.
+                source:
+                  type: string
+                  description: Source system identifier as sent by HamAlert.
+                isIota:
+                  type: boolean
+                  description: True when the spot was classified as IOTA.
+                isDxped:
+                  type: boolean
+                  description: Always true for HamAlert-sourced spots.
+
+    RootResponse:
+      type: object
+      required: [service, version, environment, links]
+      properties:
+        service:
+          type: string
+          description: Service identifier.
+          example: outdoordx-bff
+        version:
+          type: string
+          description: Deployed service version.
+          example: "0.1.0"
+        environment:
+          type: string
+          enum: [local, dev, production]
+          description: Deployment environment.
+          example: production
+        links:
+          type: array
+          description: Hypermedia links to available endpoints.
+          items:
+            $ref: '#/components/schemas/HateoasLink'
+
+    HateoasLink:
+      type: object
+      required: [rel, href, method, description]
+      properties:
+        rel:
+          type: string
+          description: Link relation type.
+          example: stream
+        href:
+          type: string
+          description: Relative URL of the linked resource.
+          example: /stream
+        method:
+          type: string
+          enum: [GET, POST, PUT, PATCH, DELETE]
+          description: HTTP method to use with this link.
+          example: GET
+        description:
+          type: string
+          description: Human-readable description of the linked resource.
+          example: SSE stream for OutdoorDX spots
+
+    HealthResponse:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          description: Service identifier.
+          example: outdoordx-bff
+        version:
+          type: string
+          description: Deployed service version.
+          example: "0.1.0"
+
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ready
+        online:
+          type: string
+          description: >
+            Active connection metrics in `<unique_ips>/<total_sessions>` format.
+            Present only in the BFF `/ready` response when Redis metric reads
+            succeed.
+          example: "5/12"
+
+    NotReadyResponse:
+      type: object
+      required: [status, reason]
+      properties:
+        status:
+          type: string
+          const: not_ready
+        reason:
+          type: string
+          enum: [redis_disabled, redis_unreachable]
+          description: Machine-readable reason for the not-ready state.
+          example: redis_unreachable
+
+    HamAlertPayload:
+      type: object
+      description: >
+        HamAlert webhook payload. Field names are flexible — the service
+        accepts multiple aliases for the same logical field. At minimum one
+        callsign alias, one frequency alias, and one timestamp alias must be
+        present and valid. All other fields are optional.
+      properties:
         callsign:
           type: string
+          description: "Activator callsign. Aliases: `fullCallsign`, `call`, `activator`, `dx_call`."
           example: EA1HET
-        reference:
+        fullCallsign:
           type: string
-          example: EA1/LE-036
-        programId:
+        call:
           type: string
-          enum: [pota, sota, iota, wwff, wwbota]
-          example: sota
-        frequency_khz:
+        activator:
+          type: string
+        dx_call:
+          type: string
+        frequency:
           type: number
-          example: 14285.0
+          description: >
+            Operating frequency. Alias: `freq`. Unit is auto-detected by
+            magnitude: values `< 1 000` are treated as **MHz** (× 1 000 000);
+            values `1 000 – 999 999` as **kHz** (× 1 000); values `≥ 1 000 000`
+            as **Hz** (used as-is).
+          example: 14.285
+        freq:
+          type: number
+        time:
+          type: string
+          description: >
+            Spot timestamp. Aliases: `spot_time`, `timestamp`, `datetime`.
+            Accepts `HH:MM` UTC or ISO 8601.
+          example: "22:57"
+        spot_time:
+          type: string
+        timestamp:
+          type: string
+        datetime:
+          type: string
         mode:
           type: string
           example: SSB
-        comment:
+        modeDetail:
           type: string
+        band:
+          type: string
+          example: 20m
         spotter:
           type: string
-          description: Callsign of the station that spotted the activation.
-        spotted_at:
+          description: "Spotter callsign. Alias: `de`."
+        de:
           type: string
-          format: date-time
+        dxcc:
+          type: string
+        continent:
+          type: string
+          example: EU
+        entity:
+          type: string
+          example: Spain
+        location:
+          type: string
+        qth:
+          type: string
+        grid:
+          type: string
+        gridsquare:
+          type: string
+        latitude:
+          type: number
+        lat:
+          type: number
+        longitude:
+          type: number
+        lon:
+          type: number
+        lng:
+          type: number
+        comment:
+          type: string
+        comments:
+          type: string
+        message:
+          type: string
+        reference:
+          type: string
+          example: EA1/LE-036
+        iota:
+          type: string
+        iota_ref:
+          type: string
+        references:
+          type: array
+          items:
+            type: string
+        referenceActivated:
+          type: string
+        iotaGroupRef:
+          type: string
+          example: EU-008
+        iotaGroupName:
+          type: string
+          example: Orkney Islands
+        wwffRef:
+          type: string
+        wwffName:
+          type: string
+        summitRef:
+          type: string
+        summitName:
+          type: string
+        summitHeight:
+          type: number
+        summitPoints:
+          type: integer
+        id:
+          type: string
+        spot_id:
+          type: string
+        uuid:
+          type: string
+        alert_id:
+          type: string
+        status:
+          type: string
+        ttl:
+          type: integer
+          description: Override the default TTL (seconds) for this spot.
+        source:
+          type: string
+        triggerComment:
+          type: string
+        snr:
+          type: number
+        speed:
+          type: number
 
     SseMessage:
       description: >
-        A single Server-Sent Event frame. The wire format is plain text;
-        each frame consists of `event: <type>` and `data: <json>` lines
-        separated by a blank line. Keep-alive frames are SSE comments
-        (`: keep-alive`) with no event or data.
+        A single Server-Sent Event frame. The wire format is plain text; each
+        frame consists of `event: <type>` and `data: <json>` lines separated
+        by a blank line. Keep-alive frames are SSE comments (`: keep-alive`)
+        with no event or data lines.
       oneOf:
         - $ref: '#/components/schemas/SseInitEvent'
-        - $ref: '#/components/schemas/SseSpotEvent'
+        - $ref: '#/components/schemas/SseAddUpdateEvent'
+        - $ref: '#/components/schemas/SseRemoveEvent'
         - $ref: '#/components/schemas/SseErrorEvent'
       discriminator:
         propertyName: event
         mapping:
           init: '#/components/schemas/SseInitEvent'
-          add: '#/components/schemas/SseSpotEvent'
-          update: '#/components/schemas/SseSpotEvent'
-          remove: '#/components/schemas/SseSpotEvent'
+          add: '#/components/schemas/SseAddUpdateEvent'
+          update: '#/components/schemas/SseAddUpdateEvent'
+          remove: '#/components/schemas/SseRemoveEvent'
           error: '#/components/schemas/SseErrorEvent'
 
     SseInitEvent:
       type: object
-      description: Sent once on connection. Contains a snapshot of all current spots.
+      description: >
+        Sent once immediately on connection. Contains a snapshot of all
+        currently active spots. The client should replace its local state with
+        this array.
       required: [event, data]
       properties:
         event:
@@ -197,20 +996,58 @@ components:
           items:
             $ref: '#/components/schemas/Spot'
 
-    SseSpotEvent:
+    SseAddUpdateEvent:
       type: object
-      description: Sent when a spot is added, updated, or removed.
+      description: >
+        Sent when a spot is first published (`add`) or subsequently modified
+        (`update`). The `data` payload is the full Pub/Sub message forwarded
+        verbatim, which includes both an `action` field (redundant with the SSE
+        event type) and the normalised `spot` object.
       required: [event, data]
       properties:
         event:
           type: string
-          enum: [add, update, remove]
+          enum: [add, update]
         data:
-          $ref: '#/components/schemas/Spot'
+          type: object
+          required: [action, spot]
+          properties:
+            action:
+              type: string
+              enum: [add, update]
+              description: >
+                Mirrors the SSE event type. Included because the BFF forwards
+                the raw Pub/Sub message as the SSE data payload.
+            spot:
+              $ref: '#/components/schemas/Spot'
+
+    SseRemoveEvent:
+      type: object
+      description: >
+        Reserved for future use. The BFF stream handler forwards `remove`
+        events from the Pub/Sub channel when they arrive, but no current
+        publisher produces them. When implemented, only the spot ID will be
+        sent — the client should remove the matching entry from its local state.
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          const: remove
+        data:
+          type: object
+          required: [id]
+          properties:
+            id:
+              type: string
+              description: ID of the spot to remove.
+              example: "sota:EA1/LE-036"
 
     SseErrorEvent:
       type: object
-      description: Sent when the stream encounters an unrecoverable error. The connection closes after this event.
+      description: >
+        Sent when the stream encounters an unrecoverable error. The server
+        closes the connection after this event. The client should reconnect
+        after a back-off delay.
       required: [event, data]
       properties:
         event:
@@ -225,6 +1062,12 @@ components:
               enum: [redis_not_configured, redis_unreachable, redis_stream_failure]
 
   responses:
+
+    RateLimitExceeded:
+      description: >
+        Rate limit exceeded. The default limit is 60 requests per minute per
+        IP address (`RATELIMIT_DEFAULT`). Per-endpoint overrides can raise the
+        ceiling for specific routes independently.
 
     ConnectionLimitExceeded:
       description: >
